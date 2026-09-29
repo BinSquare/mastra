@@ -1,0 +1,280 @@
+---
+title: "smolmachines | Sandbox"
+description: "Run Mastra workspace commands in local microVMs with smolmachines, including egress allow lists, checkpoints of the whole machine, and reconnection."
+packages:
+  - "@mastra/smolmachines"
+---
+
+# smolmachines
+
+Executes commands inside local microVMs through the [smolmachines](https://smolmachines.com) `smolvm` CLI. Each sandbox is a machine with its own Linux kernel, booted from an OCI image, under KVM on Linux or Hypervisor.framework on macOS. The provider keeps one machine per sandbox and uses `smolvm machine exec` for workspace commands. For interface details, see [WorkspaceSandbox interface](/reference/workspace/sandbox).
+
+## Installation
+
+Install the `smolvm` CLI, then the provider:
+
+```bash
+curl -sSL https://smolmachines.com/install.sh | bash
+```
+
+```bash npm2yarn
+npm install @mastra/smolmachines
+```
+
+Requires Linux with KVM (`/dev/kvm`) or a Mac with Apple silicon.
+
+## Usage
+
+Add a `SmolmachinesSandbox` to a workspace and assign it to an agent:
+
+```typescript
+import { Agent } from '@mastra/core/agent'
+import { Workspace } from '@mastra/core/workspace'
+import { SmolmachinesSandbox } from '@mastra/smolmachines'
+
+const workspace = new Workspace({
+  sandbox: new SmolmachinesSandbox({
+    image: 'node:22-slim',
+    allowHosts: ['registry.npmjs.org'],
+  }),
+})
+
+const agent = new Agent({
+  id: 'dev-agent',
+  name: 'Dev Agent',
+  instructions: 'You are a coding assistant working in this workspace.',
+  model: '__GATEWAY_ANTHROPIC_MODEL_SONNET__',
+  workspace,
+})
+
+const response = await agent.generate('Run `node --version`.')
+console.log(response.text)
+```
+
+The machine is created on first use and commands run in `/workspace`.
+
+## Constructor parameters
+
+<PropertiesTable
+  content={[
+  {
+    name: 'id',
+    type: 'string',
+    description: 'Unique identifier for this sandbox instance. A sandbox with the same `id` reconnects to the same machine.',
+    isOptional: true,
+    defaultValue: 'Auto-generated',
+  },
+  {
+    name: 'name',
+    type: 'string',
+    description: 'Machine name. Characters outside `[a-z0-9-]` are replaced with `-`.',
+    isOptional: true,
+    defaultValue: "'mastra-<id>'",
+  },
+  {
+    name: 'image',
+    type: 'string',
+    description: 'OCI image the machine boots.',
+    isOptional: true,
+    defaultValue: "'node:22-slim'",
+  },
+  {
+    name: 'cpus',
+    type: 'number',
+    description: 'Number of vCPUs.',
+    isOptional: true,
+  },
+  {
+    name: 'memoryMb',
+    type: 'number',
+    description: 'Memory in MiB.',
+    isOptional: true,
+  },
+  {
+    name: 'network',
+    type: 'boolean',
+    description:
+      'Outbound network access. The image is pulled inside the machine, so a registry image needs network access.',
+    isOptional: true,
+    defaultValue: 'true',
+  },
+  {
+    name: 'allowHosts',
+    type: 'string[]',
+    description:
+      'Allow egress only to these hosts. Entries are exact names or `*.domain` wildcards, which don\'t match the bare domain. Other hosts are blocked.',
+    isOptional: true,
+  },
+  {
+    name: 'allowCidrs',
+    type: 'string[]',
+    description: 'Allow egress only to these CIDR ranges.',
+    isOptional: true,
+  },
+  {
+    name: 'volumes',
+    type: 'Record<string, string>',
+    description: 'Host-to-machine mounts. Keys are host paths, values are machine paths.',
+    isOptional: true,
+  },
+  {
+    name: 'ports',
+    type: 'string[]',
+    description: "Published ports, for example `'8080:80'` or `'3000'`.",
+    isOptional: true,
+  },
+  {
+    name: 'env',
+    type: 'Record<string, string>',
+    description: 'Environment variables for every command.',
+    isOptional: true,
+  },
+  {
+    name: 'workingDirectory',
+    type: 'string',
+    description:
+      'Working directory inside the machine, created on start and used when no per-command `cwd` is given.',
+    isOptional: true,
+    defaultValue: "'/workspace'",
+  },
+  {
+    name: 'timeout',
+    type: 'number',
+    description: 'Default command timeout in milliseconds.',
+    isOptional: true,
+    defaultValue: '300000 (5 minutes)',
+  },
+  {
+    name: 'deleteOnDestroy',
+    type: 'boolean',
+    description: 'Delete the machine when the sandbox is destroyed. When false, destroy stops the machine instead.',
+    isOptional: true,
+    defaultValue: 'true',
+  },
+  {
+    name: 'labels',
+    type: 'Record<string, string>',
+    description: 'Additional machine labels. Mastra labels (mastra.sandbox, mastra.sandbox.id) are always included.',
+    isOptional: true,
+  },
+  {
+    name: 'checkpointName',
+    type: 'string',
+    description: 'Checkpoint to boot a new machine from and to save on `snapshot()`.',
+    isOptional: true,
+  },
+  {
+    name: 'seedCheckpointName',
+    type: 'string',
+    description: 'Checkpoint to boot from while `checkpointName` has none yet. `snapshot()` still writes `checkpointName`.',
+    isOptional: true,
+  },
+  {
+    name: 'checkpointsDirectory',
+    type: 'string',
+    description: 'Directory where checkpoints are stored.',
+    isOptional: true,
+    defaultValue: "'~/.mastra/smolmachines-checkpoints'",
+  },
+  {
+    name: 'binary',
+    type: 'string',
+    description: 'Path or name for the `smolvm` CLI.',
+    isOptional: true,
+    defaultValue: "'smolvm'",
+  },
+  {
+    name: 'instructions',
+    type: 'string | function',
+    description:
+      'Custom instructions that override the default instructions returned by getInstructions(). Pass an empty string to suppress instructions.',
+    isOptional: true,
+  },
+]}
+/>
+
+## Egress allow lists
+
+`allowHosts` and `allowCidrs` limit which hosts code in the machine can reach. The limit is enforced by the machine's host-side network stack, so code in the machine can't turn it off:
+
+```typescript
+const sandbox = new SmolmachinesSandbox({
+  image: 'python:3.12-slim',
+  allowHosts: ['pypi.org', 'files.pythonhosted.org'],
+})
+```
+
+The default instructions returned by `getInstructions()` tell the agent which hosts it can reach.
+
+## Checkpoints
+
+A checkpoint saves the whole machine: its disks, memory and running processes. Set `checkpointName`, call `snapshot()` once the machine is set up, and every new sandbox with the same `checkpointName` boots from that state instead of the image:
+
+```typescript
+const base = new SmolmachinesSandbox({ id: 'setup', checkpointName: 'node-deps' })
+await base.executeCommand('npm install -g pnpm')
+await base.snapshot()
+
+// Later, or in another process: starts with pnpm installed and anything
+// that was running still running.
+const session = new SmolmachinesSandbox({ id: 'session-1', checkpointName: 'node-deps' })
+```
+
+A machine booted from a checkpoint keeps the checkpoint's image, resources and network settings; the constructor's options for those apply only to machines booted from the image. `snapshot()` writes the new checkpoint beside the old one and then replaces it, so a sandbox booting at the same time always reads a complete checkpoint. Use `seedCheckpointName` to start new sessions from a shared warm checkpoint while each session saves its own.
+
+## Reconnection
+
+`SmolmachinesSandbox` finds its machine by name. When `start()` is called:
+
+- A running machine is reused.
+- A stopped machine is started again, with the files it had.
+- A missing machine is created from the checkpoint when one is saved, otherwise from the image.
+- A machine with the configured name but without matching Mastra ownership labels fails instead of being managed.
+- A Mastra-owned machine created with different options (image, resources, network, mounts, ports) fails instead of being reused.
+
+```typescript
+const sandbox = new SmolmachinesSandbox({ id: 'persistent-sandbox' })
+await sandbox.start()
+
+const sandbox2 = new SmolmachinesSandbox({ id: 'persistent-sandbox' })
+await sandbox2.start()
+```
+
+## Security model
+
+Each sandbox is a separate virtual machine with its own kernel, so code in it can't reach the host kernel directly. Treat constructor options as trusted server-side configuration:
+
+- `volumes` exposes host paths to code in the machine.
+- `ports` publishes services from the machine on the host.
+- `binary` is a constructor-only escape hatch for trusted code and isn't part of the serializable editor provider schema.
+
+Environment variable values are passed to the CLI through its environment, not its arguments, so they don't appear in the host's process list.
+
+## Limitations
+
+`SmolmachinesSandbox` implements foreground command execution with `executeCommand()`. It doesn't expose a `SandboxProcessManager` for background processes or LSP sessions.
+
+Command timeouts are enforced inside the machine and end everything the command started. An abort signal also ends the command and its child processes inside the machine.
+
+With `network: false`, the image can't be pulled from a registry, so creating the machine fails. Keep network access and restrict it with `allowHosts` instead.
+
+## Editor provider
+
+Register the provider with `MastraEditor` to hydrate stored sandbox configs:
+
+```typescript
+import { MastraEditor } from '@mastra/editor'
+import { smolmachinesSandboxProvider } from '@mastra/smolmachines'
+
+const editor = new MastraEditor({
+  sandboxes: {
+    [smolmachinesSandboxProvider.id]: smolmachinesSandboxProvider,
+  },
+})
+```
+
+## Related
+
+- [WorkspaceSandbox interface](/reference/workspace/sandbox)
+- [Apple Container sandbox](/integrations/sandboxes/apple-container)
+- [Sandbox](/docs/sandbox/overview)
